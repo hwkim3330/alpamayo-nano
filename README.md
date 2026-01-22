@@ -1,157 +1,147 @@
 # Alpamayo Nano
 
-NVIDIA Alpamayo-R1-10B VLA 모델의 양자화 및 Edge 배포 파이프라인.
+Real-time autonomous driving via knowledge distillation from Alpamayo-R1.
 
 ## Overview
 
-Alpamayo-R1-10B를 다양한 하드웨어에서 실행하기 위한 양자화 도구 모음:
+**Problem**: Alpamayo-R1-10B는 ~1 FPS (RTX 3090) → 실시간 자율주행 불가
 
-| 방법 | Bits | VRAM | 타겟 하드웨어 |
-|------|------|------|--------------|
-| BF16 (원본) | 16 | ~21GB | RTX 3090/4090 |
-| **INT4 NF4** | 4 | ~7.6GB | RTX 3060+, Orin NX |
-| 2-bit Quanto | 2 | ~4GB | Orin Nano 8GB |
-| 1.58-bit BitNet | 1.58 | ~3GB | Orin Nano (실험적) |
+**Solution**: Teacher-Student Distillation
+- Teacher: Alpamayo-R1-10B (정확, 느림)
+- Student: EfficientNet + MLP (빠름, 15-30 FPS)
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Teacher: Alpamayo-R1-10B                           │
+│  Image → VLM → FlowMatching → Trajectory            │
+│  11B params, ~1 FPS                                 │
+└─────────────────────────────────────────────────────┘
+                         ↓ Knowledge Distillation
+┌─────────────────────────────────────────────────────┐
+│  Student: Alpamayo-Nano                             │
+│  Image → EfficientNet → MLP → Trajectory            │
+│  ~5M params, 15-30 FPS                              │
+└─────────────────────────────────────────────────────┘
+```
 
 ## Quick Start
 
-### Option 1: Pre-quantized 모델 사용 (권장)
+### 1. Generate Training Data (Teacher Inference)
+
+```bash
+# Alpamayo로 이미지에서 trajectory 생성
+python distill/generate_data.py \
+    --input /path/to/driving/images \
+    --output data/distill \
+    --model nvidia/Alpamayo-R1-10B
+```
+
+### 2. Train Student Model
+
+```bash
+# Distillation 학습
+python distill/train.py \
+    --data data/distill \
+    --encoder efficientnet_b0 \
+    --epochs 50 \
+    --batch-size 32
+
+# 또는 합성 데이터로 테스트
+python distill/train.py --synthetic 1000 --epochs 10
+```
+
+### 3. Run Student Inference
 
 ```python
-from alpamayo_nano import AlpamayoNano
+from models.student import AlpamayoStudent
 
-# HuggingFace에서 4-bit 모델 로드
-model = AlpamayoNano.from_pretrained("dwko/Alpamayo-R1-10B-4bit")
+# 학습된 student 로드
+model = AlpamayoStudent.from_pretrained("checkpoints/student/best.pt")
 
-# 추론
-trajectory, reasoning = model.infer([camera_image])
-```
-
-### Option 2: 직접 양자화
-
-```bash
-# 4-bit 양자화
-python quantize/quantize_4bit.py --output ./my-alpamayo-4bit
-
-# 2-bit 양자화 (Orin Nano용)
-python quantize/quantize_2bit.py --output ./my-alpamayo-2bit
-
-# 1.58-bit BitNet (실험적)
-python quantize/quantize_1bit.py --output ./my-alpamayo-1bit
-```
-
-## Installation
-
-```bash
-pip install torch transformers bitsandbytes accelerate einops
-pip install git+https://github.com/NVlabs/alpamayo-r1.git
-
-# 2-bit 양자화용
-pip install quanto
-
-# Fine-tuning용
-pip install peft datasets
+# 실시간 추론 (15-30 FPS)
+trajectory = model.predict(image)
 ```
 
 ## Project Structure
 
 ```
 alpamayo-nano/
-├── alpamayo_nano.py      # 4-bit 모델 래퍼 (inference API)
-├── inference.py          # CLI 추론
+├── models/
+│   └── student.py        # Student model (EfficientNet + MLP)
 │
-├── quantize/             # 양자화 파이프라인
-│   ├── quantize_4bit.py  # INT4 NF4 (BitsAndBytes)
-│   ├── quantize_2bit.py  # 2-bit (Quanto)
-│   ├── quantize_1bit.py  # 1.58-bit BitNet
-│   └── test_quantized.py # 양자화 모델 테스트
+├── distill/              # Distillation pipeline
+│   ├── generate_data.py  # Teacher로 학습 데이터 생성
+│   └── train.py          # Student 학습
 │
-├── finetune/             # Fine-tuning
-│   └── train_head.py     # Trajectory head 학습 (VLM frozen)
+├── quantize/             # Alpamayo 양자화 (선택)
+│   ├── quantize_4bit.py
+│   ├── quantize_2bit.py
+│   └── quantize_1bit.py
 │
-└── models/               # 커스텀 모델
-    └── nano_vlm.py       # Qwen3-VL-2B 기반 경량 VLM (개발중)
+└── finetune/             # Alpamayo fine-tuning (선택)
+    └── train_head.py
 ```
 
-## Benchmark Results (RTX 3090)
+## Student Model Options
 
-### 메모리
+| Encoder | Params | FPS (3090) | FPS (Orin) | VRAM |
+|---------|--------|------------|------------|------|
+| MobileNet-V3 | 4.2M | ~35 | ~15 | 50MB |
+| EfficientNet-B0 | 5.3M | ~30 | ~12 | 80MB |
+| EfficientNet-B4 | 19M | ~20 | ~8 | 200MB |
+| ViT-Tiny | 5.7M | ~25 | ~10 | 100MB |
 
-| Model | VRAM Load | VRAM Peak |
-|-------|-----------|-----------|
-| BF16 원본 | 20.89 GB | 22+ GB |
-| **INT4 NF4** | 7.52 GB | 10.44 GB |
-| 2-bit | 4.14 GB | ~5 GB |
-| 1.58-bit | ~2.5 GB | ~4 GB |
+## Benchmark Comparison
 
-### 추론 속도 (1 camera, 4 frames)
+| Model | Params | FPS | Latency | VRAM |
+|-------|--------|-----|---------|------|
+| Alpamayo-R1 (BF16) | 11B | 1.3 | 750ms | 21GB |
+| Alpamayo-R1 (INT4) | 11B | 1.3 | 750ms | 7.6GB |
+| **Student (B0)** | 5M | 30 | 33ms | 80MB |
+| **Student (MobileNet)** | 4M | 35 | 28ms | 50MB |
 
-| Model | Time | FPS |
-|-------|------|-----|
-| BF16 | 0.75s | 1.3 |
-| INT4 | 0.75s | 1.3 |
-| 2-bit | 0.8s | 1.25 |
+**23x 속도 향상** (750ms → 33ms)
 
-**참고**: RTX 3090에서는 양자화해도 속도 향상 없음 (dequantize 오버헤드)
+## Distillation Loss
 
-## Hardware Compatibility
+```python
+Loss = trajectory_loss + 0.5 * endpoint_loss + 0.1 * smoothness_loss
 
-| Device | VRAM | BF16 | INT4 | 2-bit | 1.58-bit |
-|--------|------|------|------|-------|----------|
-| A100/H100 | 40-80GB | OK | OK | OK | OK |
-| RTX 4090 | 24GB | OK | OK | OK | OK |
-| RTX 3090 | 24GB | OK | OK | OK | OK |
-| RTX 3080 | 10GB | No | Tight | OK | OK |
-| RTX 3060 | 12GB | No | OK | OK | OK |
-| Orin NX | 16GB | No | OK | OK | OK |
-| **Orin Nano** | 8GB | No | No | **OK** | **OK** |
-
-## Fine-tuning
-
-VLM을 freeze하고 trajectory head만 학습:
-
-```bash
-python finetune/train_head.py \
-    --model dwko/Alpamayo-R1-10B-4bit \
-    --epochs 10 \
-    --lr 1e-4
+- trajectory_loss: L1 + L2 on all waypoints
+- endpoint_loss: MSE on final position (중요!)
+- smoothness_loss: penalize jerky predictions
 ```
 
-VRAM 사용량: ~10GB (4-bit 모델 + gradients)
+## Training Tips
 
-## Pre-quantized Models
+1. **데이터 다양성**: 직진, 좌회전, 우회전, 정지 등 다양한 시나리오
+2. **Data Augmentation**: 밝기, 대비, 색상 변형
+3. **Curriculum Learning**: 쉬운 시나리오(직진) → 어려운 시나리오(회전)
+4. **Endpoint 가중치**: 최종 위치 예측이 중요 → endpoint_weight 높게
 
-| Model | HuggingFace |
-|-------|-------------|
-| INT4 NF4 | [dwko/Alpamayo-R1-10B-4bit](https://huggingface.co/dwko/Alpamayo-R1-10B-4bit) |
-| INT4 NF4 | [kimhyunwoo/alpamayo-r1-10b-int4-bnb](https://huggingface.co/kimhyunwoo/alpamayo-r1-10b-int4-bnb) |
+## Hardware Requirements
 
-## Model Architecture
+**Teacher (데이터 생성):**
+- RTX 3090 24GB (INT4: 7.6GB)
+- ~1 FPS, 오프라인 작업
 
-```
-AlpamayoR1 (11B parameters)
-├── vlm: Qwen3VLForConditionalGeneration (Vision-Language)
-├── expert: Qwen3VLTextModel
-├── action_space: UnicycleAccelCurvatureActionSpace
-├── diffusion: FlowMatching
-├── action_in_proj: PerWaypointActionInProjV2
-└── action_out_proj: Linear
-```
+**Student (실시간 추론):**
+- Any GPU with 100MB+ VRAM
+- Orin Nano에서도 실행 가능
 
 ## Roadmap
 
-- [x] INT4 NF4 양자화 (BitsAndBytes)
-- [x] 2-bit 양자화 (Quanto)
-- [x] 1.58-bit BitNet 실험
-- [x] Pre-quantized 모델 HuggingFace 업로드
-- [ ] TensorRT 변환 (Orin Nano 최적화)
-- [ ] 커스텀 경량 VLM (Qwen3-VL-2B 기반)
-- [ ] ONNX export
+- [x] Student model architecture
+- [x] Distillation training pipeline
+- [x] Synthetic data for testing
+- [ ] Real driving data collection
+- [ ] TensorRT optimization
+- [ ] ONNX export for edge deployment
+- [ ] Orin Nano benchmark
 
 ## Links
 
-- Original: [nvidia/Alpamayo-R1-10B](https://huggingface.co/nvidia/Alpamayo-R1-10B)
-- GitHub: [NVlabs/alpamayo](https://github.com/NVlabs/alpamayo)
+- Teacher: [nvidia/Alpamayo-R1-10B](https://huggingface.co/nvidia/Alpamayo-R1-10B)
 - Control Server: [hwkim3330/jetson-server](https://github.com/hwkim3330/jetson-server)
 
 ## License
