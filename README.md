@@ -1,81 +1,152 @@
 # Alpamayo Nano
 
-Pre-quantized 4-bit Alpamayo-R1 for edge deployment.
+NVIDIA Alpamayo-R1-10B VLA 모델의 양자화 및 Edge 배포 파이프라인.
 
 ## Overview
 
-4-bit quantized NVIDIA Alpamayo-R1-10B VLA model for autonomous driving, optimized for edge devices.
+Alpamayo-R1-10B를 다양한 하드웨어에서 실행하기 위한 양자화 도구 모음:
 
-- **Model**: Alpamayo-R1-10B-4bit (pre-quantized NF4)
-- **VRAM**: ~7.6GB (fits RTX 3060 12GB, RTX 3080 10GB+)
-- **Inference**: ~1.0 FPS on RTX 3090
+| 방법 | Bits | VRAM | 타겟 하드웨어 |
+|------|------|------|--------------|
+| BF16 (원본) | 16 | ~21GB | RTX 3090/4090 |
+| **INT4 NF4** | 4 | ~7.6GB | RTX 3060+, Orin NX |
+| 2-bit Quanto | 2 | ~4GB | Orin Nano 8GB |
+| 1.58-bit BitNet | 1.58 | ~3GB | Orin Nano (실험적) |
 
 ## Quick Start
+
+### Option 1: Pre-quantized 모델 사용 (권장)
+
+```python
+from alpamayo_nano import AlpamayoNano
+
+# HuggingFace에서 4-bit 모델 로드
+model = AlpamayoNano.from_pretrained("dwko/Alpamayo-R1-10B-4bit")
+
+# 추론
+trajectory, reasoning = model.infer([camera_image])
+```
+
+### Option 2: 직접 양자화
+
+```bash
+# 4-bit 양자화
+python quantize/quantize_4bit.py --output ./my-alpamayo-4bit
+
+# 2-bit 양자화 (Orin Nano용)
+python quantize/quantize_2bit.py --output ./my-alpamayo-2bit
+
+# 1.58-bit BitNet (실험적)
+python quantize/quantize_1bit.py --output ./my-alpamayo-1bit
+```
+
+## Installation
 
 ```bash
 pip install torch transformers bitsandbytes accelerate einops
 pip install git+https://github.com/NVlabs/alpamayo-r1.git
 
-# Run inference
-python inference.py --image road.jpg
+# 2-bit 양자화용
+pip install quanto
+
+# Fine-tuning용
+pip install peft datasets
 ```
-
-## Usage
-
-```python
-from alpamayo_nano import AlpamayoNano
-
-# Load pre-quantized 4-bit model
-model = AlpamayoNano.from_pretrained("dwko/Alpamayo-R1-10B-4bit")
-
-# Inference
-trajectory, reasoning = model.infer(
-    images=[front_camera],
-    prompt="Please drive carefully on the road."
-)
-
-# trajectory: (T, 3) waypoints [x, y, heading]
-# reasoning: Chain-of-Causation text
-```
-
-## Memory Usage
-
-| Device | VRAM | Status |
-|--------|------|--------|
-| RTX 4090 | 24 GB | OK (fast) |
-| RTX 3090 | 24 GB | OK |
-| RTX 3080 | 10 GB | OK (tight) |
-| RTX 3060 | 12 GB | OK |
-| Orin NX | 16 GB | OK |
-
-## Features
-
-### 1. Inference API
-Simple wrapper for trajectory prediction with Chain-of-Causation reasoning.
-
-### 2. jetson-server Integration
-Web-based robot control with Tesla FSD-style visualization.
-
-### 3. Trajectory Head Fine-tuning
-Train custom trajectory head while keeping VLM frozen (memory efficient).
 
 ## Project Structure
 
 ```
-alpamayo_nano/
-├── inference.py          # Main inference script
-├── alpamayo_nano.py      # Model wrapper
-├── finetune/             # Head-only fine-tuning
-│   └── train_head.py
-└── jetson-server/        # Web control interface (submodule)
+alpamayo-nano/
+├── alpamayo_nano.py      # 4-bit 모델 래퍼 (inference API)
+├── inference.py          # CLI 추론
+│
+├── quantize/             # 양자화 파이프라인
+│   ├── quantize_4bit.py  # INT4 NF4 (BitsAndBytes)
+│   ├── quantize_2bit.py  # 2-bit (Quanto)
+│   ├── quantize_1bit.py  # 1.58-bit BitNet
+│   └── test_quantized.py # 양자화 모델 테스트
+│
+├── finetune/             # Fine-tuning
+│   └── train_head.py     # Trajectory head 학습 (VLM frozen)
+│
+└── models/               # 커스텀 모델
+    └── nano_vlm.py       # Qwen3-VL-2B 기반 경량 VLM (개발중)
 ```
+
+## Benchmark Results (RTX 3090)
+
+### 메모리
+
+| Model | VRAM Load | VRAM Peak |
+|-------|-----------|-----------|
+| BF16 원본 | 20.89 GB | 22+ GB |
+| **INT4 NF4** | 7.52 GB | 10.44 GB |
+| 2-bit | 4.14 GB | ~5 GB |
+| 1.58-bit | ~2.5 GB | ~4 GB |
+
+### 추론 속도 (1 camera, 4 frames)
+
+| Model | Time | FPS |
+|-------|------|-----|
+| BF16 | 0.75s | 1.3 |
+| INT4 | 0.75s | 1.3 |
+| 2-bit | 0.8s | 1.25 |
+
+**참고**: RTX 3090에서는 양자화해도 속도 향상 없음 (dequantize 오버헤드)
+
+## Hardware Compatibility
+
+| Device | VRAM | BF16 | INT4 | 2-bit | 1.58-bit |
+|--------|------|------|------|-------|----------|
+| A100/H100 | 40-80GB | OK | OK | OK | OK |
+| RTX 4090 | 24GB | OK | OK | OK | OK |
+| RTX 3090 | 24GB | OK | OK | OK | OK |
+| RTX 3080 | 10GB | No | Tight | OK | OK |
+| RTX 3060 | 12GB | No | OK | OK | OK |
+| Orin NX | 16GB | No | OK | OK | OK |
+| **Orin Nano** | 8GB | No | No | **OK** | **OK** |
+
+## Fine-tuning
+
+VLM을 freeze하고 trajectory head만 학습:
+
+```bash
+python finetune/train_head.py \
+    --model dwko/Alpamayo-R1-10B-4bit \
+    --epochs 10 \
+    --lr 1e-4
+```
+
+VRAM 사용량: ~10GB (4-bit 모델 + gradients)
 
 ## Pre-quantized Models
 
-| Model | Bits | VRAM | HuggingFace |
-|-------|------|------|-------------|
-| 4-bit NF4 | 4 | 7.6 GB | [dwko/Alpamayo-R1-10B-4bit](https://huggingface.co/dwko/Alpamayo-R1-10B-4bit) |
-| 4-bit NF4 | 4 | 7.6 GB | [kimhyunwoo/alpamayo-r1-10b-int4-bnb](https://huggingface.co/kimhyunwoo/alpamayo-r1-10b-int4-bnb) |
+| Model | HuggingFace |
+|-------|-------------|
+| INT4 NF4 | [dwko/Alpamayo-R1-10B-4bit](https://huggingface.co/dwko/Alpamayo-R1-10B-4bit) |
+| INT4 NF4 | [kimhyunwoo/alpamayo-r1-10b-int4-bnb](https://huggingface.co/kimhyunwoo/alpamayo-r1-10b-int4-bnb) |
+
+## Model Architecture
+
+```
+AlpamayoR1 (11B parameters)
+├── vlm: Qwen3VLForConditionalGeneration (Vision-Language)
+├── expert: Qwen3VLTextModel
+├── action_space: UnicycleAccelCurvatureActionSpace
+├── diffusion: FlowMatching
+├── action_in_proj: PerWaypointActionInProjV2
+└── action_out_proj: Linear
+```
+
+## Roadmap
+
+- [x] INT4 NF4 양자화 (BitsAndBytes)
+- [x] 2-bit 양자화 (Quanto)
+- [x] 1.58-bit BitNet 실험
+- [x] Pre-quantized 모델 HuggingFace 업로드
+- [ ] TensorRT 변환 (Orin Nano 최적화)
+- [ ] 커스텀 경량 VLM (Qwen3-VL-2B 기반)
+- [ ] ONNX export
 
 ## Links
 

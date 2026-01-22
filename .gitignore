@@ -9,8 +9,8 @@ build/
 .idea/
 .vscode/
 *.log
-*.jpg
-*.png
 output*.jpg
-archive/
-models/
+checkpoints/
+*.pt
+*.bin
+*.safetensors
